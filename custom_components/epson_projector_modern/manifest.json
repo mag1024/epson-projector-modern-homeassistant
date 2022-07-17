@@ -1,0 +1,9 @@
+{
+  "version": "0.0.1",
+  "domain": "epson_projector_modern",
+  "name": "Epson Projector (Modern)",
+  "config_flow": true,
+  "requirements": [],
+  "codeowners": ["@mag1024"],
+  "iot_class": "local_polling"
+}
