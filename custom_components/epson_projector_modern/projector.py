@@ -32,6 +32,16 @@ POWER_STATUS = {
     5: "Abnormal standby",
 }
 
+EVENT_TO_POWER_STATUS = {
+    1: 4, # standby
+    2: 2, # warmup
+    3: 1, # normal
+    4: 3, # cooldown
+}
+
+def _power_status_str(status):
+    return POWER_STATUS[status] if status else "Unknown"
+
 class CommandError(Exception):
     pass
 
@@ -39,15 +49,17 @@ class Connection(asyncio.Protocol):
     ESCVPNET = 'ESC/VP.net'
     IMEVENT = 'IMEVENT'
     SEND_TERMINATOR = '\r\n'
-    RECV_TERMINATOR = '\r:'
+    RECV_TERMINATOR = ':'
 
     def __init__(self, on_imevent, on_disconnect):
         self._on_imevent = on_imevent
         self._on_disconnect = on_disconnect
         self._transport = None
-        self._pending = asyncio.Queue()
+
+        self._request_lock = asyncio.Lock()
+        self._pending_result = None
+
         self._buffer = ""
-        self._response_event = asyncio.Event()
         self._last_response = None
 
     def connection_made(self, transport):
@@ -55,9 +67,7 @@ class Connection(asyncio.Protocol):
 
     def connection_lost(self, exc):
         LOG.info("Connection terminated.")
-        while self._pending.qsize():
-            (cmd, fut) = self._pending.get_nowait()
-            fut.set_exception(CommandError())
+        if result := self._pending_result: result.set_exception(CommandError())
         self._buffer = ""
         self._on_disconnect()
 
@@ -65,77 +75,51 @@ class Connection(asyncio.Protocol):
         LOG.debug("<< %s", data)
         self._last_response = datetime.now()
         self._buffer += data.decode()
-        self._try_consume_buffer()
+        self._maybe_consume_buffer()
 
-    def send_command(self, command, arg, terminator = SEND_TERMINATOR) -> asyncio.Future:
-        response = asyncio.get_running_loop().create_future()
-        self._pending.put_nowait((command, response))
-        self.send_command_no_response(command + arg, terminator)
-        return response
-
-    def send_command_no_response(self, command, terminator = SEND_TERMINATOR):
-        request = (command + terminator).encode('ascii')
-        LOG.debug(">> %s", request)
-        self._transport.write(request)
+    async def send_command(self, command, terminator = SEND_TERMINATOR, delay=0) -> str:
+        async with self._request_lock:
+            self._pending_result = asyncio.get_running_loop().create_future()
+            request = (command + terminator).encode('ascii')
+            LOG.debug(">> %s", request)
+            self._transport.write(request)
+            try:
+                data = await self._pending_result
+                if delay: await asyncio.sleep(delay)
+                return data
+            finally:
+                self._pending_result = None
 
     async def handshake(self):
-        resp = await self.send_command(self.ESCVPNET, '', '\x10\x03\x00\x00\x00\x00')
+        resp = await self.send_command(self.ESCVPNET, '\x10\x03\x00\x00\x00\x00')
         status = ord(resp[14])
         if status != STATUS_OK: raise RuntimeError("Handshake error: " + STATUS[status])
-
-    async def wait_ready(self):
-        if self._response_event.is_set(): self._response_event.clear()
-        for i in range(0, 6):
-            if self._response_event.is_set(): return
-            self.send_command_no_response('')
-            try:
-                await asyncio.wait_for(self._response_event.wait(), timeout=5)
-            except asyncio.exceptions.TimeoutError as e:
-                LOG.debug("...")
-        LOG.warning("Waiting for ready timed out; resetting connection.")
-        self.close()
 
     def close(self):
         if self._transport:
             self._transport.abort()
             self._transport = None
 
-    def last_response_age(self):
-        return datetime.now() - self._last_response
+    def last_response_age(self): return datetime.now() - self._last_response
 
-    def _try_consume_buffer(self):
-        while self._buffer.startswith(':'):
-            self._response_event.set()
-            self._buffer = self._buffer[1:]
-
-        if self._buffer.startswith(self.IMEVENT):
-            (resp, self._buffer) = self._try_consume_buffer_to_terminator()
-            if resp: self._on_imevent(resp[len(self.IMEVENT) + 1:])
-            return
-
+    def _maybe_consume_buffer(self):
         if self._buffer.startswith(self.ESCVPNET):
             if len(self._buffer) < 16: return
             # insert a terminator so it can be processed like a regular command
             self._buffer = self._buffer[0:16] + self.RECV_TERMINATOR + self._buffer[16:]
 
-        (resp, self._buffer) = self._try_consume_buffer_to_terminator()
-        if not resp: return
+        while ':' in self._buffer:
+            (resp, self._buffer) = self._buffer.split(':', 1)
+            if len(resp) and resp[-1] == '\r': resp = resp[0:-1]
+            if resp.startswith(self.IMEVENT):
+                self._on_imevent(resp[len(self.IMEVENT) + 1:])
+                return
 
-        (cmd, fut) = self._pending.get_nowait()
-        if resp == 'ERR':
-            fut.set_exception(CommandError())
-            return
-        while not resp.startswith(cmd):
-            LOG.warning("Command mismatch: expected %s, got %s" % (cmd, resp))
-            fut.set_exception(CommandError())
-            if not self._pending.qsize(): return
-            (cmd, fut) = self._pending.get_nowait()
-        fut.set_result(resp)
-
-    def _try_consume_buffer_to_terminator(self) -> (str, str):
-        end = self._buffer.find(self.RECV_TERMINATOR)
-        if end < 0: return (None, self._buffer)
-        return self._buffer[0:end], self._buffer[end+len(self.RECV_TERMINATOR):]
+            if result := self._pending_result:
+                if resp == 'ERR': result.set_exception(CommandError())
+                else: result.set_result(resp)
+            else:
+                LOG.warning('Unexpected response: ' + resp)
 
 
 class Projector:
@@ -168,21 +152,24 @@ class Projector:
         if self._connection: self._connection.close()
 
     @property
-    def power(self) -> bool: return self._power_status and self._power_status in [1, 2]
+    def power(self) -> bool: return self._power_status in [1, 2]
     @property
     def connection_ok(self) -> bool: return self._connection != None
     @property
     def source_list(self) -> [str]: return list(self._sources_dict.values())
     @property
     def source(self) -> str:
-        try:
-            return self._sources_dict[self._source]
-        except:
-            return 'unknown'
+        try: return self._sources_dict[self._source]
+        except: return 'unknown'
 
     async def set_power(self, on_off):
-        await self._execute_command(COMMAND.POWER, "ON" if on_off else "OFF")
-        await self._connection.wait_ready()
+        # if the projector receives other commands shortly after the poweroff,
+        # it gets upset, and the network interface becomes wedged in a way that
+        # doesn't recover even if the connection is re-established, until the
+        # projector is turned back on via the remote.
+        # hence power off sleeps for 10 seconds while holding the send lock.
+        (state, delay) = ('ON', 0) if on_off else ('OFF', 10)
+        await self._execute_command(COMMAND.POWER, state, delay=delay)
 
     async def set_source(self, source_name):
         for code, name in self._sources_dict.items():
@@ -192,8 +179,8 @@ class Projector:
         LOG.warning("Unknown source name: " + source_name)
 
     def log_state(self):
-        LOG.debug("Serial number: " + self.serial_number)
-        LOG.debug("Power status: " + POWER_STATUS[self._power_status])
+        LOG.debug("Serial number: " + repr(self.serial_number))
+        LOG.debug("Power status: " + _power_status_str(self._power_status))
         LOG.debug("Connection status: " + repr(self.connection_ok))
         LOG.debug("Source list: " + repr(self.source_list))
         LOG.debug("Source: " + repr(self.source))
@@ -222,52 +209,49 @@ class Projector:
                 logging.exception("Connection monitor exception")
 
     async def _monitor_connection_once(self):
-        if self._connection:
-            age = self._connection.last_response_age()
-            if age > timedelta(minutes=1): self._keepalive()
+        if con := self._connection:
+            age = con.last_response_age()
+            if age > timedelta(minutes=1): await con.send_command('')
             if age > timedelta(minutes=3):
                 LOG.warning("Communication timeout: resetting connection.")
                 self._connection.close()
         else:
-            try:
-                await self._connect()
+            try: await self._connect()
             except asyncio.exceptions.TimeoutError as e:
                 LOG.debug("Connection timed out...")
 
     async def _query(self, command):
         if not self.connection_ok: raise RuntimeError("Connection not ready")
-        resp = await self._connection.send_command(command, '?')
+        resp = await self._connection.send_command(command + '?')
         if not resp.startswith(command + '='):
             raise RuntimeError("Malformed query response: " + resp)
         return resp[len(command)+1:]
 
-    async def _execute_command(self, command, arg):
+    async def _execute_command(self, command, arg, delay=0):
         if not self.connection_ok: raise RuntimeError("Connection not ready")
-        self._connection.send_command_no_response(command + ' ' + arg)
-        await self._connection.wait_ready()
-
-    def _keepalive(self):
-        self._connection.send_command_no_response('')
+        await self._connection.send_command(command + ' ' + arg, delay=delay)
 
     async def _update_status(self):
-        await self._connection.wait_ready()
-        self._power_status = int(await self._query(COMMAND.POWER))
+        if not self._power_status:
+            self._power_status = int(await self._query(COMMAND.POWER))
         if not self.serial_number:
             self.serial_number = await self._query(COMMAND.SERIAL_NUMBER)
+
+        if not self.power: return
         try:
             self._source = await self._query(COMMAND.SOURCE)
             if not len(self._sources_dict):
                 sl = (await self._query(COMMAND.SOURCE_LIST)).split(' ')
                 self._sources_dict = { code:name for code,name in zip(sl[0::2], sl[1::2]) }
-        except asyncio.exceptions.CancelledError:
-            raise
-        except:
-            LOG.debug("Not ready to retrieve sources.")
+        except asyncio.exceptions.CancelledError: raise
+        except: LOG.debug("Not ready to retrieve sources.")
 
     def _on_imevent(self, data):
-        LOG.debug("Status update: " + data)
+        self._power_status = EVENT_TO_POWER_STATUS[int(data.split(' ')[1])]
         asyncio.ensure_future(self._update_status())
 
     def _on_disconnect(self):
         self._connection = None
+        self._power_state = None
+        self._source = None
 
