@@ -5,5 +5,5 @@
   "config_flow": true,
   "requirements": [],
   "codeowners": ["@mag1024"],
-  "iot_class": "local_polling"
+  "iot_class": "local_push"
 }
