@@ -1,0 +1,35 @@
+load_lens_memory:
+  name: Load lens memory
+  description: Recall saved lens memory settings of Epson projector
+  target:
+    entity:
+      integration: epson_projector_modern
+      domain: media_player
+  fields:
+    slot:
+      name: Memory slot
+      description: Memory slot number
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 1
+          max: 10
+
+load_image_memory:
+  name: Load image memory
+  description: Recall saved image memory settings of Epson projector
+  target:
+    entity:
+      integration: epson_projector_modern
+      domain: media_player
+  fields:
+    slot:
+      name: Memory slot
+      description: Memory slot number
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 1
+          max: 10

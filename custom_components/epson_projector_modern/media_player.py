@@ -13,6 +13,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_OFF, STATE_ON, CONF_UNIQUE_ID
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers import config_validation as cv, entity_platform
 
 from .const import DOMAIN
 from .projector import Projector
@@ -20,6 +21,16 @@ from .projector import Projector
 _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass, config_entry, async_add_entities) -> None:
+    platform = entity_platform.async_get_current_platform()
+    LOAD_LENS_MEMORY = "load_lens_memory"
+    platform.async_register_entity_service(
+        LOAD_LENS_MEMORY, { vol.Required('slot'): cv.positive_int }, LOAD_LENS_MEMORY
+    )
+    LOAD_IMAGE_MEMORY = "load_image_memory"
+    platform.async_register_entity_service(
+        LOAD_IMAGE_MEMORY, { vol.Required('slot'): cv.positive_int }, LOAD_IMAGE_MEMORY
+    )
+
     projector = hass.data[DOMAIN][config_entry.entry_id]
     unique_id = config_entry.data[CONF_UNIQUE_ID]
     async_add_entities([EpsonProjectorMediaPlayer(projector, unique_id)])
@@ -91,3 +102,9 @@ class EpsonProjectorMediaPlayer(MediaPlayerEntity):
     async def async_select_source(self, source):
         """Select input source."""
         await self._projector.set_source(source)
+
+    async def load_lens_memory(self, slot):
+        await self._projector.load_lens_memory(slot)
+
+    async def load_image_memory(self, slot):
+        await self._projector.load_image_memory(slot)

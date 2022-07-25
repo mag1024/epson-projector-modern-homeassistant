@@ -8,7 +8,8 @@ class COMMAND:
     POWER = "PWR"
     SOURCE = "SOURCE"
     SOURCE_LIST = "SOURCELIST"
-    LENS_POSSITION = "POPLP"
+    LOAD_LENS_MEMORY = "POPLP"
+    LOAD_IMAGE_MEMORY = "POPMEM"
     SERIAL_NUMBER = "SNO"
 
 STATUS_OK = 0x20
@@ -177,6 +178,12 @@ class Projector:
                 await self._execute_command(COMMAND.SOURCE, code)
                 return
         LOG.warning("Unknown source name: " + source_name)
+
+    async def load_lens_memory(self, slot):
+        await self._execute_command(COMMAND.LOAD_LENS_MEMORY, f'{slot:02X}')
+
+    async def load_image_memory(self, slot):
+        await self._execute_command(COMMAND.LOAD_IMAGE_MEMORY, f'02 {slot:02X}')
 
     def log_state(self):
         LOG.debug("Serial number: " + repr(self.serial_number))
