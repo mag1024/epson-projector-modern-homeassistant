@@ -211,6 +211,7 @@ class Projector:
                 await asyncio.sleep(30)
                 await self._monitor_connection_once()
             except asyncio.exceptions.CancelledError:
+                logging.info("Monitoring thread cancelled.")
                 raise
             except:
                 logging.exception("Connection monitor exception")
